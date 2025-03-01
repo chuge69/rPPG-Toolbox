@@ -2,9 +2,9 @@ BASE: ['']
 TOOLBOX_MODE: "train_and_test"      # "train_and_test"  or "only_test"
 TRAIN:
   BATCH_SIZE: 4
-  EPOCHS: 10
+  EPOCHS: 50
   LR: 1e-4
-  MODEL_FILE_NAME: UBFC-rPPG_MMPD_Mymodel
+  MODEL_FILE_NAME: UBFC-rPPG_MMPD_FocalPhys
   PLOT_LOSSES_AND_LR: True
   DATA:
     FS: 30
@@ -18,10 +18,10 @@ TRAIN:
     END: 0.8
     PREPROCESS:
       DATA_TYPE: ['DiffNormalized']
-      DATA_AUG: ['None']    # 'None' or 'Motion' is supported, used if the data path points to an augmented dataset or requires augmentation
+      DATA_AUG: ['None']    # 'None' or 'Motion' is supported
       LABEL_TYPE: DiffNormalized
       DO_CHUNK: True
-      CHUNK_LENGTH: 160
+      CHUNK_LENGTH: 128
       CROP_FACE:
         DO_CROP_FACE: True
         BACKEND: 'HC'    # HC for Haar Cascade, RF for RetinaFace
@@ -30,7 +30,7 @@ TRAIN:
         DETECTION:
           DO_DYNAMIC_DETECTION: False
           DYNAMIC_DETECTION_FREQUENCY : 30
-          USE_MEDIAN_FACE_BOX: False    # This should be used ONLY if dynamic detection is used
+          USE_MEDIAN_FACE_BOX: False
       RESIZE:
         H: 128
         W: 128
@@ -38,34 +38,34 @@ VALID:
   DATA:
     FS: 30
     DATASET: UBFC-rPPG
-    DO_PREPROCESS: False                  # if first time, should be true
+    DO_PREPROCESS: False
     DATA_FORMAT: NCDHW
-    DATA_PATH: "/home/zangqc/dataset/UBFC-rPPG/"                     # Raw dataset path, need to be updated
-    CACHED_PATH: "/home/zangqc/dataset/CACHE/UBFC-rPPG/"     # Processed dataset save path, need to be updated
+    DATA_PATH: "/home/zangqc/dataset/UBFC-rPPG/"
+    CACHED_PATH: "/home/zangqc/dataset/CACHE/UBFC-rPPG/"
     EXP_DATA_NAME: ""
     BEGIN: 0.8
     END: 1.0
     PREPROCESS:
       DATA_TYPE: ['DiffNormalized']
-      DATA_AUG: ['None']    # 'None' or 'Motion' is supported, used if the data path points to an augmented dataset or requires augmentation
+      DATA_AUG: ['None']
       LABEL_TYPE: DiffNormalized
       DO_CHUNK: True
-      CHUNK_LENGTH: 160
+      CHUNK_LENGTH: 128
       CROP_FACE:
         DO_CROP_FACE: True
-        BACKEND: 'HC'    # HC for Haar Cascade, RF for RetinaFace
+        BACKEND: 'HC'
         USE_LARGE_FACE_BOX: True
         LARGE_BOX_COEF: 1.5
         DETECTION:
           DO_DYNAMIC_DETECTION: False
           DYNAMIC_DETECTION_FREQUENCY : 30
-          USE_MEDIAN_FACE_BOX: False    # This should be used ONLY if dynamic detection is used
+          USE_MEDIAN_FACE_BOX: False
       RESIZE:
         H: 128
         W: 128
 TEST:
   METRICS: ['MAE', 'RMSE', 'MAPE', 'Pearson', 'SNR', 'BA']
-  USE_LAST_EPOCH: False                      # to use provided validation dataset to find the best epoch, should be false
+  USE_LAST_EPOCH: False
   DATA:
     INFO:
       LIGHT: [1, 2, 3, 4]  # 1 - LED-Low, 2 - LED-high, 3 - Incandescent, 4 - Nature
@@ -78,27 +78,27 @@ TEST:
       MAKEUP: [1, 2] # 1 - True, 2 - False
     FS: 30
     DATASET: MMPD
-    DO_PREPROCESS: False                  # if first time, should be true
+    DO_PREPROCESS: False
     DATA_FORMAT: NCDHW
-    DATA_PATH:   "/home/zangqc/dataset/mini-MMPD/mini_MMPD/"          # Raw dataset path, need to be updated
-    CACHED_PATH: "/home/zangqc/dataset/CACHE/miniMMPD/"      # Processed dataset save path, need to be updated     # Processed dataset save path, need to be updated
+    DATA_PATH:   "/home/zangqc/dataset/mini-MMPD/mini_MMPD/"
+    CACHED_PATH: "/home/zangqc/dataset/CACHE/miniMMPD/"
     EXP_DATA_NAME: ""
     BEGIN: 0.0
     END: 1.0
     PREPROCESS:
-      DATA_TYPE: [ 'DiffNormalized']
+      DATA_TYPE: ['DiffNormalized']
       LABEL_TYPE: DiffNormalized
       DO_CHUNK: True
-      CHUNK_LENGTH: 160
+      CHUNK_LENGTH: 128
       CROP_FACE:
         DO_CROP_FACE: True
-        BACKEND: 'HC'    # HC for Haar Cascade, RF for RetinaFace
+        BACKEND: 'HC'
         USE_LARGE_FACE_BOX: True
         LARGE_BOX_COEF: 1.5
         DETECTION:
           DO_DYNAMIC_DETECTION: False
           DYNAMIC_DETECTION_FREQUENCY : 30
-          USE_MEDIAN_FACE_BOX: False    # This should be used ONLY if dynamic detection is used
+          USE_MEDIAN_FACE_BOX: False
       RESIZE:
         H: 128
         W: 128
@@ -107,19 +107,13 @@ NUM_OF_GPU_TRAIN: 1
 LOG:
   PATH: runs/exp
 MODEL:
-  DROP_RATE: 0.1
   NAME: FocalPhys
-  FOCALPHYS:                     # Probably need to update these in some meaningful way
-    PATCH_SIZE: 4
-    DIM: 96
-    FF_DIM: 144
-    NUM_HEADS: 4
-    NUM_LAYERS: 12
-    THETA: 0.7
+  FOCALPHYS:
+    FRAME_NUM: 128
 INFERENCE:
   BATCH_SIZE: 4
   EVALUATION_METHOD: "FFT"        # "FFT" or "peak detection"
   EVALUATION_WINDOW:
-    USE_SMALLER_WINDOW: False        # Change this if you'd like an evaluation window smaller than the test video length
+    USE_SMALLER_WINDOW: False
     WINDOW_SIZE: 30        # In seconds
-  MODEL_PATH:   ""
+  MODEL_PATH: ""

@@ -1,0 +1,79 @@
+TOOLBOX_MODE: "train_and_test"
+NUM_OF_GPU_TRAIN: 1
+LOG_PATH: "log"
+MODEL_PATH: "model"
+DEVICE: "cuda:0"
+INFO:
+    EXPERIMENT_NAME: "PURE_PURE_UBFC-rPPG_FOCALPHYS_BASIC"
+    EXPERIMENT_TIME: "2024_03_01"
+
+TRAIN:
+    BATCH_SIZE: 4
+    EPOCHS: 50
+    LR: 1e-4
+    MODEL_FILE_NAME: "PURE_PURE_UBFC-rPPG_FOCALPHYS_BASIC"
+    PLOT_LOSSES_AND_LR: True
+    DATA:
+        FS: 30
+        DATASET: "PURE"
+        DATA_PATH: "data/PURE"
+        CACHED_PATH: "data_cache/PURE_PURE_UBFC-rPPG_FOCALPHYS_BASIC/train"
+        NUM_WORKERS: 4
+        LABEL_TYPE: "Difference"
+        DO_PREPROCESS: False
+        DATA_FORMAT: "NDCHW"
+        DATA_AUG: True
+        PREPROCESS:
+            DO_CHUNK: True
+            CHUNK_LENGTH: 128
+            CROP_FACE: True
+            LARGE_FACE_BOX: True
+            LARGE_BOX_COEF: 1.5
+            H: 128
+            W: 128
+
+VALID:
+    DATA:
+        FS: 30
+        DATASET: "PURE"
+        DATA_PATH: "data/PURE"
+        CACHED_PATH: "data_cache/PURE_PURE_UBFC-rPPG_FOCALPHYS_BASIC/valid"
+        NUM_WORKERS: 4
+        LABEL_TYPE: "Difference"
+        DO_PREPROCESS: False
+        DATA_FORMAT: "NDCHW"
+        DATA_AUG: False
+        PREPROCESS:
+            DO_CHUNK: True
+            CHUNK_LENGTH: 128
+            CROP_FACE: True
+            LARGE_FACE_BOX: True
+            LARGE_BOX_COEF: 1.5
+            H: 128
+            W: 128
+
+TEST:
+    USE_LAST_EPOCH: False
+    DATA:
+        FS: 30
+        DATASET: "UBFC-rPPG"
+        DATA_PATH: "data/UBFC-rPPG"
+        CACHED_PATH: "data_cache/PURE_PURE_UBFC-rPPG_FOCALPHYS_BASIC/test"
+        NUM_WORKERS: 4
+        LABEL_TYPE: "Difference"
+        DO_PREPROCESS: False
+        DATA_FORMAT: "NDCHW"
+        DATA_AUG: False
+        PREPROCESS:
+            DO_CHUNK: True
+            CHUNK_LENGTH: 128
+            CROP_FACE: True
+            LARGE_FACE_BOX: True
+            LARGE_BOX_COEF: 1.5
+            H: 128
+            W: 128
+
+MODEL:
+    NAME: "FocalPhys"
+    FOCALPHYS:
+        FRAME_NUM: 128 

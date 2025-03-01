@@ -1,269 +1,254 @@
-"""Temporal Shift Convolutional Attention Network (TS-CAN).
-Multi-Task Temporal Shift Attention Networks for On-Device Contactless Vitals Measurement
-NeurIPS, 2020
-Xin Liu, Josh Fromm, Shwetak Patel, Daniel McDuff
-"""
+# --------------------------------------------------------
+# FocalNets -- Focal Modulation Networks
+# Copyright (c) 2022 Microsoft
+# Licensed under The MIT License [see LICENSE for details]
+# Written by Jianwei Yang (jianwyan@microsoft.com)
+# --------------------------------------------------------
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.models.registry import register_model
 
+from torchvision import transforms
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.data import create_transform
+from timm.data.transforms import str_to_pil_interp
+from einops import rearrange
 
-class Attention_mask(nn.Module):
-    def __init__(self):
-        super(Attention_mask, self).__init__()
-
-    def forward(self, x):
-        xsum = torch.sum(x, dim=2, keepdim=True)
-        xsum = torch.sum(xsum, dim=3, keepdim=True)
-        xshape = tuple(x.size())
-        return x / xsum * xshape[2] * xshape[3] * 0.5
-
-    def get_config(self):
-        """May be generated manually. """
-        config = super(Attention_mask, self).get_config()
-        return config
-
-
-class TSM(nn.Module):
-    def __init__(self, n_segment=10, fold_div=3):
-        super(TSM, self).__init__()
-        self.n_segment = n_segment
-        self.fold_div = fold_div
+class Mlp(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
 
     def forward(self, x):
-        nt, c, h, w = x.size()
-        n_batch = nt // self.n_segment
-        x = x.view(n_batch, self.n_segment, c, h, w)
-        fold = c // self.fold_div
-        out = torch.zeros_like(x)
-        out[:, :-1, :fold] = x[:, 1:, :fold]  # shift left
-        out[:, 1:, fold: 2 * fold] = x[:, :-1, fold: 2 * fold]  # shift right
-        out[:, :, 2 * fold:] = x[:, :, 2 * fold:]  # not shift
-        return out.view(nt, c, h, w)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
 
+class SpatioTemporalFocalModulation(nn.Module):
+    def __init__(self, dim, focal_window=3, focal_level=2, focal_factor=2, bias=True, proj_drop=0., num_frames=128):
+        super().__init__()
+        self.dim = dim
+        self.focal_window = focal_window
+        self.focal_level = focal_level
+        self.focal_factor = focal_factor
+        self.num_frames = num_frames
 
-class TSCAN(nn.Module):
+        self.f = nn.Linear(dim, 2*dim + (self.focal_level+1), bias=bias)
+        self.h = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=bias)
+        
+        self.act = nn.GELU()
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.focal_layers = nn.ModuleList()
 
-    def __init__(self, in_channels=3, nb_filters1=32, nb_filters2=64, kernel_size=3, dropout_rate1=0.25,
-                 dropout_rate2=0.5, pool_size=(2, 2), nb_dense=128, frame_depth=20, img_size=36):
-        """Definition of TS_CAN.
-        Args:
-          in_channels: the number of input channel. Default: 3
-          frame_depth: the number of frame (window size) used in temport shift. Default: 20
-          img_size: height/width of each frame. Default: 36.
-        Returns:
-          TS_CAN model.
-        """
-        super(TSCAN, self).__init__()
-        self.in_channels = in_channels
-        self.kernel_size = kernel_size
-        self.dropout_rate1 = dropout_rate1
-        self.dropout_rate2 = dropout_rate2
-        self.pool_size = pool_size
-        self.nb_filters1 = nb_filters1
-        self.nb_filters2 = nb_filters2
-        self.nb_dense = nb_dense
-        # TSM layers
-        self.TSM_1 = TSM(n_segment=frame_depth)
-        self.TSM_2 = TSM(n_segment=frame_depth)
-        self.TSM_3 = TSM(n_segment=frame_depth)
-        self.TSM_4 = TSM(n_segment=frame_depth)
-        # Motion branch convs
-        self.motion_conv1 = nn.Conv2d(self.in_channels, self.nb_filters1, kernel_size=self.kernel_size, padding=(1, 1),
-                                      bias=True)
-        self.motion_conv2 = nn.Conv2d(
-            self.nb_filters1, self.nb_filters1, kernel_size=self.kernel_size, bias=True)
-        self.motion_conv3 = nn.Conv2d(self.nb_filters1, self.nb_filters2, kernel_size=self.kernel_size, padding=(1, 1),
-                                      bias=True)
-        self.motion_conv4 = nn.Conv2d(
-            self.nb_filters2, self.nb_filters2, kernel_size=self.kernel_size, bias=True)
-        # Apperance branch convs
-        self.apperance_conv1 = nn.Conv2d(self.in_channels, self.nb_filters1, kernel_size=self.kernel_size,
-                                         padding=(1, 1), bias=True)
-        self.apperance_conv2 = nn.Conv2d(
-            self.nb_filters1, self.nb_filters1, kernel_size=self.kernel_size, bias=True)
-        self.apperance_conv3 = nn.Conv2d(self.nb_filters1, self.nb_filters2, kernel_size=self.kernel_size,
-                                         padding=(1, 1), bias=True)
-        self.apperance_conv4 = nn.Conv2d(
-            self.nb_filters2, self.nb_filters2, kernel_size=self.kernel_size, bias=True)
-        # Attention layers
-        self.apperance_att_conv1 = nn.Conv2d(
-            self.nb_filters1, 1, kernel_size=1, padding=(0, 0), bias=True)
-        self.attn_mask_1 = Attention_mask()
-        self.apperance_att_conv2 = nn.Conv2d(
-            self.nb_filters2, 1, kernel_size=1, padding=(0, 0), bias=True)
-        self.attn_mask_2 = Attention_mask()
-        # Avg pooling
-        self.avg_pooling_1 = nn.AvgPool2d(self.pool_size)
-        self.avg_pooling_2 = nn.AvgPool2d(self.pool_size)
-        self.avg_pooling_3 = nn.AvgPool2d(self.pool_size)
-        # Dropout layers
-        self.dropout_1 = nn.Dropout(self.dropout_rate1)
-        self.dropout_2 = nn.Dropout(self.dropout_rate1)
-        self.dropout_3 = nn.Dropout(self.dropout_rate1)
-        self.dropout_4 = nn.Dropout(self.dropout_rate2)
-        # Dense layers
-        if img_size == 36:
-            self.final_dense_1 = nn.Linear(3136, self.nb_dense, bias=True)
-        elif img_size == 72:
-            self.final_dense_1 = nn.Linear(16384, self.nb_dense, bias=True)
-        elif img_size == 96:
-            self.final_dense_1 = nn.Linear(30976, self.nb_dense, bias=True)
-        elif img_size == 128:
-            self.final_dense_1 = nn.Linear(57600, self.nb_dense, bias=True)
-        else:
-            raise Exception('Unsupported image size')
-        self.final_dense_2 = nn.Linear(self.nb_dense, 1, bias=True)
+        self.f_temporal = nn.Linear(dim, dim + (self.focal_level+1), bias=bias)
+        self.h_temporal = nn.Conv1d(dim, dim, kernel_size=1, stride=1, bias=bias)
+        self.focal_layers_temporal = nn.ModuleList()
+        
+        for k in range(self.focal_level):
+            kernel_size = self.focal_factor*k + self.focal_window
+            self.focal_layers.append(
+                nn.Sequential(
+                    nn.Conv2d(dim, dim, kernel_size=kernel_size, stride=1, 
+                    groups=dim, padding=kernel_size//2, bias=False),
+                    nn.GELU(),
+                )
+            )
+            self.focal_layers_temporal.append(
+                nn.Sequential(
+                    nn.Conv1d(dim, dim, kernel_size=kernel_size, stride=1,
+                    padding=kernel_size//2, bias=False),
+                    nn.GELU(),
+                )
+            )
 
-    def forward(self, inputs, params=None):
-        diff_input = inputs[:, :3, :, :]
-        raw_input = inputs[:, 3:, :, :]
+    def forward(self, x):
+        B, H, W, C = x.shape
 
-        diff_input = self.TSM_1(diff_input)
-        d1 = torch.tanh(self.motion_conv1(diff_input))
-        d1 = self.TSM_2(d1)
-        d2 = torch.tanh(self.motion_conv2(d1))
+        # Temporal modulation
+        x_temporal = torch.clone(x)
+        x_temporal = rearrange(x_temporal, '(b t) h w c -> (b h w) t c', t=self.num_frames)
+        x_temporal = self.f_temporal(x_temporal).permute(0, 2, 1).contiguous()
+        ctx_temporal, gates_temporal = torch.split(x_temporal, (C, self.focal_level+1), 1)
 
-        r1 = torch.tanh(self.apperance_conv1(raw_input))
-        r2 = torch.tanh(self.apperance_conv2(r1))
+        ctx_all_temporal = 0
+        for l in range(self.focal_level):
+            ctx = self.focal_layers_temporal[l](ctx_temporal)
+            ctx_all_temporal = ctx_all_temporal + ctx*gates_temporal[:, l:l+1]
+        ctx_global_temporal = self.act(ctx_temporal.mean(2, keepdim=True))
+        ctx_all_temporal = ctx_all_temporal + ctx_global_temporal*gates_temporal[:,self.focal_level:]
 
-        g1 = torch.sigmoid(self.apperance_att_conv1(r2))
-        g1 = self.attn_mask_1(g1)
-        gated1 = d2 * g1
+        # Spatial modulation
+        x = self.f(x).permute(0, 3, 1, 2).contiguous()
+        q, ctx, gates = torch.split(x, (C, C, self.focal_level+1), 1)
+        
+        ctx_all = 0
+        for l in range(self.focal_level):
+            ctx = self.focal_layers[l](ctx)
+            ctx_all = ctx_all + ctx*gates[:, l:l+1]
+        ctx_global = self.act(ctx.mean(2, keepdim=True).mean(3, keepdim=True))
+        ctx_all = ctx_all + ctx_global*gates[:,self.focal_level:]
 
-        d3 = self.avg_pooling_1(gated1)
-        d4 = self.dropout_1(d3)
+        # Combine temporal and spatial modulation
+        modulator_temporal = self.h_temporal(ctx_all_temporal)
+        modulator_temporal = rearrange(modulator_temporal, '(b h w) c t -> (b t) c h w', t=self.num_frames, h=H, w=W)
+        modulator = self.h(ctx_all)
 
-        r3 = self.avg_pooling_2(r2)
-        r4 = self.dropout_2(r3)
+        x_out = q * modulator * modulator_temporal
+        x_out = x_out.permute(0, 2, 3, 1).contiguous()
+        x_out = self.proj(x_out)
+        x_out = self.proj_drop(x_out)
+        
+        return x_out
 
-        d4 = self.TSM_3(d4)
-        d5 = torch.tanh(self.motion_conv3(d4))
-        d5 = self.TSM_4(d5)
-        d6 = torch.tanh(self.motion_conv4(d5))
+class FocalPhys(nn.Module):
+    def __init__(self, frames=128):
+        super().__init__()
+        
+        # Encoder
+        self.conv1 = nn.Sequential(
+            nn.Conv3d(3, 32, [1, 5, 5], stride=1, padding=[0, 2, 2]),
+            nn.BatchNorm3d(32),
+            nn.ReLU(inplace=True),
+        )
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv3d(32, 64, [3, 3, 3], stride=1, padding=1),
+            nn.BatchNorm3d(64),
+            nn.ReLU(inplace=True),
+        )
+        
+        # Focal blocks
+        self.focal1 = SpatioTemporalFocalModulation(dim=64, num_frames=frames)
+        self.focal2 = SpatioTemporalFocalModulation(dim=64, num_frames=frames//2)
+        self.focal3 = SpatioTemporalFocalModulation(dim=64, num_frames=frames//4)
+        
+        # Spatial pooling
+        self.pool = nn.MaxPool3d((1, 2, 2), stride=(1, 2, 2))
+        self.pool_spatiotemporal = nn.MaxPool3d((2, 2, 2), stride=2)
+        
+        # Global pooling
+        self.global_pool = nn.AdaptiveAvgPool3d((frames, 1, 1))
+        
+        # Final prediction
+        self.conv_final = nn.Conv3d(64, 1, [1, 1, 1], stride=1, padding=0)
 
-        r5 = torch.tanh(self.apperance_conv3(r4))
-        r6 = torch.tanh(self.apperance_conv4(r5))
+    def forward(self, x):
+        batch_size = x.shape[0]
+        
+        # Initial convolutions
+        x = self.conv1(x)
+        x = self.pool(x)
+        
+        x = self.conv2(x)
+        x_visual64 = x.clone()
+        
+        # First focal block
+        x = rearrange(x, 'b c t h w -> (b t) h w c')
+        x = self.focal1(x)
+        x = rearrange(x, '(b t) h w c -> b c t h w', b=batch_size)
+        x = self.pool_spatiotemporal(x)
+        x_visual32 = x.clone()
+        
+        # Second focal block
+        x = rearrange(x, 'b c t h w -> (b t) h w c')
+        x = self.focal2(x)
+        x = rearrange(x, '(b t) h w c -> b c t h w', b=batch_size)
+        x = self.pool_spatiotemporal(x)
+        x_visual16 = x.clone()
+        
+        # Third focal block
+        x = rearrange(x, 'b c t h w -> (b t) h w c')
+        x = self.focal3(x)
+        x = rearrange(x, '(b t) h w c -> b c t h w', b=batch_size)
+        
+        # Global pooling and final prediction
+        x = self.global_pool(x)
+        x = self.conv_final(x)
+        
+        rppg = x.view(batch_size, -1)
+        
+        return rppg, x_visual64, x_visual32, x_visual16
 
-        g2 = torch.sigmoid(self.apperance_att_conv2(r6))
-        g2 = self.attn_mask_2(g2)
-        gated2 = d6 * g2
+def build_transforms(img_size, center_crop=False):
+    t = []
+    if center_crop:
+        size = int((256 / 224) * img_size)
+        t.append(
+            transforms.Resize(size, interpolation=str_to_pil_interp('bicubic'))
+        )
+        t.append(
+            transforms.CenterCrop(img_size)    
+        )
+    else:
+        t.append(
+            transforms.Resize(img_size, interpolation=str_to_pil_interp('bicubic'))
+        )        
+    t.append(transforms.ToTensor())
+    t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
+    return transforms.Compose(t)
 
-        d7 = self.avg_pooling_3(gated2)
-        d8 = self.dropout_3(d7)
-        d9 = d8.view(d8.size(0), -1)
-        d10 = torch.tanh(self.final_dense_1(d9))
-        d11 = self.dropout_4(d10)
-        out = self.final_dense_2(d11)
+def build_transforms4display(img_size, center_crop=False):
+    t = []
+    if center_crop:
+        size = int((256 / 224) * img_size)
+        t.append(
+            transforms.Resize(size, interpolation=str_to_pil_interp('bicubic'))
+        )
+        t.append(
+            transforms.CenterCrop(img_size)    
+        )
+    else:
+        t.append(
+            transforms.Resize(img_size, interpolation=str_to_pil_interp('bicubic'))
+        )  
+    t.append(transforms.ToTensor())
+    return transforms.Compose(t)
 
-        return out
+model_urls = {
+    "videofocalnet_tiny": "",
+    "videofocalnet_small": "",
+    "videofocalnet_base": "",
+}
 
+@register_model
+def videofocalnet_tiny(pretrained=False, **kwargs):
+    model = FocalPhys(frames=128)
+    if pretrained:
+        url = model_urls['videofocalnet_tiny']
+        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
+    return model
 
-class MTTS_CAN(nn.Module):
-    """MTTS_CAN is the multi-task (respiration) version of TS-CAN"""
+@register_model
+def videofocalnet_small(pretrained=False, **kwargs):
+    model = FocalPhys(frames=256)
+    if pretrained:
+        url = model_urls['videofocalnet_small']
+        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu")
+        model.load_state_dict(checkpoint["model"])
+    return model
 
-    def __init__(self, in_channels=3, nb_filters1=32, nb_filters2=64, kernel_size=3, dropout_rate1=0.25,
-                 dropout_rate2=0.5, pool_size=(2, 2), nb_dense=128, frame_depth=20):
-        super(MTTS_CAN, self).__init__()
-        self.in_channels = in_channels
-        self.kernel_size = kernel_size
-        self.dropout_rate1 = dropout_rate1
-        self.dropout_rate2 = dropout_rate2
-        self.pool_size = pool_size
-        self.nb_filters1 = nb_filters1
-        self.nb_filters2 = nb_filters2
-        self.nb_dense = nb_dense
-        # TSM layers
-        self.TSM_1 = TSM(n_segment=frame_depth)
-        self.TSM_2 = TSM(n_segment=frame_depth)
-        self.TSM_3 = TSM(n_segment=frame_depth)
-        self.TSM_4 = TSM(n_segment=frame_depth)
-        # Motion branch convs
-        self.motion_conv1 = nn.Conv2d(self.in_channels, self.nb_filters1, kernel_size=self.kernel_size, padding=(1, 1),
-                                      bias=True)
-        self.motion_conv2 = nn.Conv2d(
-            self.nb_filters1, self.nb_filters1, kernel_size=self.kernel_size, bias=True)
-        self.motion_conv3 = nn.Conv2d(self.nb_filters1, self.nb_filters2, kernel_size=self.kernel_size, padding=(1, 1),
-                                      bias=True)
-        self.motion_conv4 = nn.Conv2d(
-            self.nb_filters2, self.nb_filters2, kernel_size=self.kernel_size, bias=True)
-        # Apperance branch convs
-        self.apperance_conv1 = nn.Conv2d(self.in_channels, self.nb_filters1, kernel_size=self.kernel_size,
-                                         padding=(1, 1), bias=True)
-        self.apperance_conv2 = nn.Conv2d(
-            self.nb_filters1, self.nb_filters1, kernel_size=self.kernel_size, bias=True)
-        self.apperance_conv3 = nn.Conv2d(self.nb_filters1, self.nb_filters2, kernel_size=self.kernel_size,
-                                         padding=(1, 1), bias=True)
-        self.apperance_conv4 = nn.Conv2d(
-            self.nb_filters2, self.nb_filters2, kernel_size=self.kernel_size, bias=True)
-        # Attention layers
-        self.apperance_att_conv1 = nn.Conv2d(
-            self.nb_filters1, 1, kernel_size=1, padding=(0, 0), bias=True)
-        self.attn_mask_1 = Attention_mask()
-        self.apperance_att_conv2 = nn.Conv2d(
-            self.nb_filters2, 1, kernel_size=1, padding=(0, 0), bias=True)
-        self.attn_mask_2 = Attention_mask()
-        # Avg pooling
-        self.avg_pooling_1 = nn.AvgPool2d(self.pool_size)
-        self.avg_pooling_2 = nn.AvgPool2d(self.pool_size)
-        self.avg_pooling_3 = nn.AvgPool2d(self.pool_size)
-        # Dropout layers
-        self.dropout_1 = nn.Dropout(self.dropout_rate1)
-        self.dropout_2 = nn.Dropout(self.dropout_rate1)
-        self.dropout_3 = nn.Dropout(self.dropout_rate1)
-        self.dropout_4_y = nn.Dropout(self.dropout_rate2)
-        self.dropout_4_r = nn.Dropout(self.dropout_rate2)
+@register_model
+def videofocalnet_base(pretrained=False, **kwargs):
+    model = FocalPhys(frames=512)
+    if pretrained:
+        url = model_urls['videofocalnet_base']
+        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu")
+        model.load_state_dict(checkpoint["model"])
+    return model
 
-        # Dense layers
-        self.final_dense_1_y = nn.Linear(16384, self.nb_dense, bias=True)
-        self.final_dense_2_y = nn.Linear(self.nb_dense, 1, bias=True)
-        self.final_dense_1_r = nn.Linear(16384, self.nb_dense, bias=True)
-        self.final_dense_2_r = nn.Linear(self.nb_dense, 1, bias=True)
-
-    def forward(self, inputs, params=None):
-        diff_input = inputs[:, :3, :, :]
-        raw_input = inputs[:, 3:, :, :]
-
-        diff_input = self.TSM_1(diff_input)
-        d1 = torch.tanh(self.motion_conv1(diff_input))
-        d1 = self.TSM_2(d1)
-        d2 = torch.tanh(self.motion_conv2(d1))
-
-        r1 = torch.tanh(self.apperance_conv1(raw_input))
-        r2 = torch.tanh(self.apperance_conv2(r1))
-
-        g1 = torch.sigmoid(self.apperance_att_conv1(r2))
-        g1 = self.attn_mask_1(g1)
-        gated1 = d2 * g1
-
-        d3 = self.avg_pooling_1(gated1)
-        d4 = self.dropout_1(d3)
-
-        r3 = self.avg_pooling_2(r2)
-        r4 = self.dropout_2(r3)
-
-        d4 = self.TSM_3(d4)
-        d5 = torch.tanh(self.motion_conv3(d4))
-        d5 = self.TSM_4(d5)
-        d6 = torch.tanh(self.motion_conv4(d5))
-
-        r5 = torch.tanh(self.apperance_conv3(r4))
-        r6 = torch.tanh(self.apperance_conv4(r5))
-
-        g2 = torch.sigmoid(self.apperance_att_conv2(r6))
-        g2 = self.attn_mask_2(g2)
-        gated2 = d6 * g2
-
-        d7 = self.avg_pooling_3(gated2)
-        d8 = self.dropout_3(d7)
-        d9 = d8.view(d8.size(0), -1)
-
-        d10 = torch.tanh(self.final_dense_1_y(d9))
-        d11 = self.dropout_4_y(d10)
-        out_y = self.final_dense_2_y(d11)
-
-        d10 = torch.tanh(self.final_dense_1_r(d9))
-        d11 = self.dropout_4_r(d10)
-        out_r = self.final_dense_2_r(d11)
-
-        return out_y, out_r
+if __name__ == '__main__':
+    print('test')
